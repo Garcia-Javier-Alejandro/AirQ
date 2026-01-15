@@ -1,1 +1,6 @@
 firmware/include/config.h
+firmware/include/config.h
+firmware/.pio/
+firmware/.vscode/
+web/node_modules/
+web/.wrangler/
