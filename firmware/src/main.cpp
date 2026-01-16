@@ -1,3 +1,9 @@
+// TODO (post-review):
+// - Add hysteresis to LED behavior to prevent flicker near AQ thresholds
+// - Expose AQ thresholds and hysteresis margins via config.h
+// - Evaluate discrete (banded) vs continuous (gradient) LED color signaling
+
+
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecureBearSSL.h>
@@ -8,9 +14,11 @@
 #include <Adafruit_SHT31.h>
 #include <Adafruit_NeoPixel.h>
 
-// You will copy config.example.h -> config.h and edit it
-#include "config.h"
 
+#include "config.h" // local secrets + per-device settings (NOT committed; See config.example.h for an example)
+
+
+// Hardware stack
 Adafruit_NeoPixel leds(N_LEDS, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
 Adafruit_SGP30 sgp;
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
@@ -18,12 +26,14 @@ Adafruit_SHT31 sht31 = Adafruit_SHT31();
 static uint32_t bootMs = 0;
 static uint32_t lastSample = 0;
 
+// Apply brightness cap and update first pixel (assumes at least 1 LED)
 static void setLed(uint32_t c) {
   leds.setBrightness(LED_BRIGHTNESS);
   leds.setPixelColor(0, c);
   leds.show();
 }
 
+// From power-on until WARMUP_MS expires the LED ignores air quality and shows a slow pulsing blue
 static uint32_t pulsingBlue(uint32_t nowMs) {
   float phase = (nowMs % 1000) / 1000.0f;
   float tri = (phase < 0.5f) ? (phase * 2.0f) : (2.0f - phase * 2.0f);
@@ -31,31 +41,45 @@ static uint32_t pulsingBlue(uint32_t nowMs) {
   return leds.Color(0, 0, b);
 }
 
-// 0..200 index from TVOC ppb (heuristic; tune later)
-static uint16_t tvocToIndex(uint16_t tvoc) {
-  if (tvoc <= 500) return (uint16_t)(tvoc / 50);               // 0..10
-  if (tvoc <= 2000) return (uint16_t)(10 + (tvoc - 500) / 10); // 10..160
-  return 200;
-}
-
-static uint32_t colorForIndex(uint16_t idx) {
-  idx = (idx > 200) ? 200 : idx;
-  if (idx <= 10) return leds.Color(0, 255, 0);
-
-  float t = (idx - 10) / 190.0f;
-  if (t < 0.5f) {
-    float u = t / 0.5f; // green->yellow
-    return leds.Color((uint8_t)(255 * u), 255, 0);
-  } else {
-    float u = (t - 0.5f) / 0.5f; // yellow->red
-    return leds.Color(255, (uint8_t)(255 * (1.0f - u)), 0);
+// 0..100 index from TVOC ppb (tune later!)
+static uint8_t tvocToIndex(uint16_t tvoc) {
+  if (tvoc <= 400) {
+    // 0..400 ppb → 0..20
+    return (uint8_t)(tvoc / 20);
   }
+  if (tvoc <= 1000) {
+    // 400..1000 ppb → 20..50
+    return (uint8_t)(20 + (tvoc - 400) * 30 / 600);
+  }
+  if (tvoc <= 2000) {
+    // 1000..2000 ppb → 50..80
+    return (uint8_t)(50 + (tvoc - 1000) * 30 / 1000);
+  }
+  // >2000 ppb → clamp
+  return 100;
 }
+
+
+//Index →
+//0    20         60           100
+//|----|----------|------------|
+// G      G→Y        Y→R
+static uint32_t colorForIndex(uint8_t idx) {
+  if (idx <= 20) return leds.Color(0, 255, 0);
+  if (idx <= 60) {
+    float u = (idx - 20) / 40.0f; // green->yellow
+    return leds.Color((uint8_t)(255 * u), 255, 0);
+  }
+  float u = (idx - 60) / 40.0f;   // yellow->red
+  return leds.Color(255, (uint8_t)(255 * (1.0f - u)), 0);
+}
+
 
 // absolute humidity (mg/m^3) for SGP30 compensation
 static uint32_t absoluteHumidity_mgm3(float tempC, float rh) {
   // saturation vapor pressure (hPa)
   float svp = 6.112f * expf((17.62f * tempC) / (243.12f + tempC));
+  // actual vapor pressure (hPa)
   float avp = svp * (rh / 100.0f);
   // absolute humidity (g/m^3)
   float ah = 2.1674f * avp * 100.0f / (273.15f + tempC);
@@ -72,11 +96,12 @@ static void wifiConnect() {
   }
 }
 
+// HTTPS POST to Cloudlfare ingest endpoint
 static bool postIngest(const String& json) {
   if (WiFi.status() != WL_CONNECTED) return false;
 
   std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
-  client->setInsecure(); // MVP; later: CA bundle or pinning
+  client->setInsecure(); // MVP; later: CA bundle
 
   HTTPClient https;
   if (!https.begin(*client, INGEST_URL)) return false;
@@ -100,13 +125,15 @@ void setup() {
   leds.clear();
   leds.show();
 
-  bool shtOk = sht31.begin(0x44);
+  bool shtOk = sht31.begin(0x44); 
+  //When there is a SHT sensor, use I2C, talk to device at address 0x44 (GND), return if it is acknowledged.
   bool sgpOk = sgp.begin();
+  // When there is a SGP sensor, use it at its only possible I2C address, return if it is acknowledged.
 
   if (!shtOk) Serial.println("{\"error\":\"SHT3x not found\"}");
   if (!sgpOk) Serial.println("{\"error\":\"SGP30 not found\"}");
 
-  if (sgpOk) sgp.IAQinit();
+  if (sgpOk) sgp.IAQinit(); //Start internal air-quality algorithm and baseline tracking.
 
   wifiConnect();
 }
@@ -115,39 +142,62 @@ void loop() {
   uint32_t now = millis();
   bool warmingUp = (now - bootMs) < WARMUP_MS;
 
+  // Sample cadence (SGP30 IAQ wants ~1 Hz; keep SAMPLE_MS around 1000 in config.h)
   if (now - lastSample >= SAMPLE_MS) {
     lastSample = now;
 
-    float tC = sht31.readTemperature();
-    float rh = sht31.readHumidity();
+    //Defensive initialization
+    float tC = NAN;
+    float rh = NAN;
 
+    // If SHT sensor is present and initialized, attempt to read temperature/humidity.  
+    if (shtOk) {
+      tC = sht31.readTemperature();
+      rh = sht31.readHumidity();
+    }
+    // If the SHT sensor readings are actually valid numerical values, do the math for absolute humidity into SGP compensation
     if (!isnan(tC) && !isnan(rh)) {
       uint32_t ah = absoluteHumidity_mgm3(tC, rh);
-      sgp.setHumidity(ah);
+      sgp.setHumidity(ah); // From Adafruit SGP30 library
     }
 
-    bool ok = sgp.IAQmeasure();
-    uint16_t tvoc = ok ? sgp.TVOC : 0;
-    uint16_t eco2 = ok ? sgp.eCO2 : 0;
+    bool ok = sgp.IAQmeasure();  // Trigger single SGP measurement step
+    uint16_t tvoc; // Total Volatile Organic Compounds
+    uint16_t eco2; // equivalent CO2
+    if (ok) {
+      tvoc = sgp.TVOC;
+      eco2 = sgp.eCO2;
+    } else {
+      tvoc = 0;
+      eco2 = 0;
+    }
+
 
     uint16_t idx = tvocToIndex(tvoc);
 
-    setLed(warmingUp ? pulsingBlue(now) : colorForIndex(idx));
+    uint32_t ledColor;  //led color!
+    if (warmingUp) {
+      ledColor = pulsingBlue(now);
+    } else {
+      ledColor = colorForIndex(idx);
+    }
 
-    String json = "{";
-    json += "\"ts_ms\":" + String(now) + ",";
-    json += "\"device_id\":\"" + String(DEVICE_ID) + "\",";
-    json += "\"t_c\":" + String(tC, 2) + ",";
-    json += "\"rh\":" + String(rh, 2) + ",";
-    json += "\"tvoc_ppb\":" + String(tvoc) + ",";
-    json += "\"eco2_ppm\":" + String(eco2) + ",";
-    json += "\"aq_index\":" + String(idx) + ",";
-    json += "\"warming_up\":" + String(warmingUp ? "true" : "false");
-    json += "}";
+setLed(ledColor);
 
-    Serial.println(json);
+// Build a JSON payload manually (kept small to reduce heap usage on ESP8266)
+String json = "{";
+json += "\"ts_ms\":" + String(now) + ",";                 // Time since boot (ms)
+json += "\"device_id\":\"" + String(DEVICE_ID) + "\",";   // Device ID
+json += "\"t_c\":" + String(tC, 2) + ",";                 // Temp (°C)
+json += "\"rh\":" + String(rh, 2) + ",";                  // Humidity (%)
+json += "\"tvoc_ppb\":" + String(tvoc) + ",";             // TVOC (ppb)
+json += "\"eco2_ppm\":" + String(eco2) + ",";             // eCO2 (ppm)
+json += "\"aq_index\":" + String(idx) + ",";              // AQ index (0–100)
+json += "\"warming_up\":" + String(warmingUp ? "true" : "false"); // Warmup flag
+json += "}";  // End JSON
 
-    // non-blocking philosophy: best-effort post; if it fails, next sample tries again
-    (void)postIngest(json);
+Serial.println(json);      // Serial log
+(void)postIngest(json);    // Cloud ingest (best-effort)
+
   }
 }
