@@ -14,8 +14,10 @@
 #include <Adafruit_SHT31.h>
 #include <Adafruit_NeoPixel.h>
 
-
 #include "config.h" // local secrets + per-device settings (NOT committed; See config.example.h for an example)
+
+static bool shtOk = false;
+static bool sgpOk = false;
 
 
 // Hardware stack
@@ -125,9 +127,9 @@ void setup() {
   leds.clear();
   leds.show();
 
-  bool shtOk = sht31.begin(0x44); 
+  shtOk = sht31.begin(0x44); 
   //When there is a SHT sensor, use I2C, talk to device at address 0x44 (GND), return if it is acknowledged.
-  bool sgpOk = sgp.begin();
+  sgpOk = sgp.begin();
   // When there is a SGP sensor, use it at its only possible I2C address, return if it is acknowledged.
 
   if (!shtOk) Serial.println("{\"error\":\"SHT3x not found\"}");
@@ -161,16 +163,17 @@ void loop() {
       sgp.setHumidity(ah); // From Adafruit SGP30 library
     }
 
-    bool ok = sgp.IAQmeasure();  // Trigger single SGP measurement step
-    uint16_t tvoc; // Total Volatile Organic Compounds
-    uint16_t eco2; // equivalent CO2
-    if (ok) {
-      tvoc = sgp.TVOC;
-      eco2 = sgp.eCO2;
-    } else {
-      tvoc = 0;
-      eco2 = 0;
-    }
+uint16_t tvoc = 0; // Total Volatile Organic Compounds
+uint16_t eco2 = 0; // Equivalent CO2
+
+if (sgpOk) {
+  bool ok = sgp.IAQmeasure();  // Trigger single SGP measurement step
+  if (ok) {
+    tvoc = sgp.TVOC; // Total Volatile Organic Compounds
+    eco2 = sgp.eCO2; // Equivalent CO2
+  }
+}
+
 
 
     uint16_t idx = tvocToIndex(tvoc);
