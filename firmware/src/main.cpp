@@ -127,8 +127,8 @@ void setup() {
   leds.clear();
   leds.show();
 
-  shtOk = sht31.begin(0x44); 
-  //When there is a SHT sensor, use I2C, talk to device at address 0x44 (GND), return if it is acknowledged.
+  shtOk = sht31.begin(0x45); 
+  //When there is a SHT sensor, use I2C, talk to device at address 0x45 (BEWARE, NOT THE USUAL 0x44!), return if it is acknowledged.
   sgpOk = sgp.begin();
   // When there is a SGP sensor, use it at its only possible I2C address, return if it is acknowledged.
 
