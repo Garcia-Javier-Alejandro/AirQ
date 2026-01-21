@@ -1,13 +1,338 @@
-<!DOCTYPE html>
+<!--
+  AirQ – Offline Dashboard
+
+  Static, offline-first dashboard to visualize time-series data
+  Data is pasted as one JSON object per line (matching Serial.println(json)).
+
+  Later: replace the textarea paste input with fetch() calls once an ingest API exists.
+-->
+
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AirQ</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AirQ – Dashboard</title>
+
+  <!--
+    Chart.js is used to render time-series charts without any build tooling.
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!--
+    Minimal styling to keep the focus on data inspection.
+  -->
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 20px;
+      background: #fafafa;
+    }
+
+    /*
+      Constrain the dashboard to 70% width and center it.
+      This keeps the layout readable on wide monitors and matches a “panel” feel.
+    */
+    .container {
+      width: 70%;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin-bottom: 4px;
+    }
+
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
+
+    textarea {
+      width: 100%;
+      height: 140px;
+      font-family: monospace;
+      margin: 12px 0;
+    }
+
+    button {
+      padding: 8px 14px;
+      font-size: 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 24px;
+    }
+
+    .panel {
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 12px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 260px;
+    }
+  </style>
 </head>
+
 <body>
+  <div class="container">
     <h1>AirQ</h1>
-    <p>Air Quality Monitoring System</p>
+    <div class="muted">Offline time-series dashboard (paste serial JSON)</div>
+
+    <!--
+      Temporary ingest mechanism:
+      Paste the ESP8266 Serial output here (one JSON object per line).
+      This mirrors the firmware payload fields: ts_ms, t_c, rh, tvoc_ppb, eco2_ppm, aq_index, warming_up.
+    -->
+    <textarea id="input" placeholder="Paste ESP8266 serial output here (one JSON per line)"></textarea>
+
+    <!--
+      Parses the textarea and renders charts.
+      Kept as a button-triggered action to avoid parsing partial/incomplete paste operations.
+    -->
+    <button onclick="loadData()">Load data</button>
+
+    <!--
+      One chart per signal.
+      Each chart shares the same time axis (ts_ms converted to seconds).
+    -->
+    <div class="grid">
+      <div class="panel"><canvas id="trhChart"></canvas></div>
+      <div class="panel"><canvas id="gasChart"></canvas></div>
+      <div class="panel"><canvas id="aqChart"></canvas></div>
+    </div>
+  </div>
+
+  <script>
+    // Track Chart.js instances so we can destroy/rebuild them cleanly on reload
+    let charts = [];
+
+    /*
+      Create one time-series line chart.
+
+      Why this helper exists:
+      - Keeps chart construction consistent across panels
+      - Makes it easy to tune common chart options in one place (axes, point density, smoothing)
+    */
+    function makeChart(canvasId, chartData, chartOptions) {
+      const ctx = document.getElementById(canvasId).getContext("2d");
+      return new Chart(ctx, {
+        type: "line",
+        data: chartData,
+        options: chartOptions
+      });
+    }
+
+    /*
+      Parse the pasted JSON lines into an array of samples and render charts.
+
+      Input expectation:
+      - Each line begins with '{' and is valid JSON (as printed by Serial.println(json))
+      - ts_ms is used as the time axis (converted to seconds for readability)
+
+      Failure mode:
+      - If the pasted text contains malformed JSON, JSON.parse will throw. For now, that is acceptable;
+        later we can add a simple try/catch to skip bad lines if needed.
+    */
+    function loadData() {
+      // Clear previously rendered charts (avoids duplicated canvases and memory leaks)
+      charts.forEach(c => c.destroy());
+      charts = [];
+
+      const lines = document.getElementById("input").value
+        .split("\n")
+        .map(l => l.trim())
+        .filter(l => l.startsWith("{"));
+
+      const samples = lines.map(l => JSON.parse(l));
+
+      // Convert ts_ms to seconds since boot (string labels keep Chart.js axis readable)
+      const t = samples.map(s => (s.ts_ms / 1000).toFixed(1));
+
+      // Extract signals matching the firmware JSON keys
+      const temp = samples.map(s => s.t_c);
+      const rh = samples.map(s => s.rh);
+      const tvoc = samples.map(s => s.tvoc_ppb);
+      const eco2 = samples.map(s => s.eco2_ppm);
+      const aq = samples.map(s => s.aq_index);
+
+      /*
+        Temperature + Relative Humidity on a shared time axis with dual Y scales.
+        This keeps environmental context in a single panel while preserving readability.
+      */
+      charts.push(makeChart(
+        "trhChart",
+        {
+          labels: t,
+          datasets: [
+            {
+              label: "Temperature (°C)",
+              data: temp,
+              borderColor: "#ff6b6b",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.15,
+              yAxisID: "yTemp"
+            },
+            {
+              label: "Relative Humidity (%)",
+              data: rh,
+              borderColor: "#4dabf7",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.15,
+              yAxisID: "yRh"
+            }
+          ]
+        },
+        {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { title: { display: true, text: "Time (s since boot)" } },
+            yTemp: {
+              type: "linear",
+              position: "left",
+              title: { display: true, text: "°C" }
+            },
+            yRh: {
+              type: "linear",
+              position: "right",
+              title: { display: true, text: "%" },
+              grid: { drawOnChartArea: false }
+            }
+          },
+          plugins: {
+            legend: { display: true }
+          }
+        }
+      ));
+
+      /*
+        TVOC + eCO₂ on a shared time axis with dual Y scales.
+        These are related signals but have different magnitudes/units, so they must not share one scale.
+      */
+      charts.push(makeChart(
+        "gasChart",
+        {
+          labels: t,
+          datasets: [
+            {
+              label: "TVOC (ppb)",
+              data: tvoc,
+              borderColor: "#845ef7",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.15,
+              yAxisID: "yTvoc"
+            },
+            {
+              label: "eCO₂ (ppm)",
+              data: eco2,
+              borderColor: "#f59f00",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.15,
+              yAxisID: "yEco2"
+            }
+          ]
+        },
+        {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { title: { display: true, text: "Time (s since boot)" } },
+            yTvoc: {
+              type: "linear",
+              position: "left",
+              title: { display: true, text: "ppb" }
+            },
+            yEco2: {
+              type: "linear",
+              position: "right",
+              title: { display: true, text: "ppm" },
+              grid: { drawOnChartArea: false }
+            }
+          },
+          plugins: {
+            legend: { display: true }
+          }
+        }
+      ));
+
+      /*
+        AQ Index chart with threshold bands:
+        - Green band: 0–20
+        - Yellow band: 20–60
+        - Red band: 60–100
+
+        This provides a Grafana-like “state background” that matches the firmware’s AQ semantics.
+      */
+      const aqBandsPlugin = {
+        id: "aqBands",
+        beforeDraw(chart) {
+          const { ctx, chartArea, scales } = chart;
+          if (!chartArea) return;
+
+          const y = scales.y;
+          const xLeft = chartArea.left;
+          const xRight = chartArea.right;
+
+          function fillBand(yMin, yMax, rgba) {
+            const yTop = y.getPixelForValue(yMax);
+            const yBottom = y.getPixelForValue(yMin);
+            ctx.save();
+            ctx.fillStyle = rgba;
+            ctx.fillRect(xLeft, yTop, xRight - xLeft, yBottom - yTop);
+            ctx.restore();
+          }
+
+          fillBand(0, 20,  "rgba(47, 158, 68, 0.10)");
+          fillBand(20, 60, "rgba(245, 159, 0, 0.10)");
+          fillBand(60, 100,"rgba(255, 107, 107, 0.10)");
+        }
+      };
+
+      charts.push(makeChart(
+        "aqChart",
+        {
+          labels: t,
+          datasets: [{
+            label: "Air Quality Index (0–100)",
+            data: aq,
+            borderColor: "#2f9e44",
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.15,
+            yAxisID: "y"
+          }]
+        },
+        {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { title: { display: true, text: "Time (s since boot)" } },
+            y: {
+              beginAtZero: true,
+              suggestedMax: 100,
+              title: { display: true, text: "AQ Index" }
+            }
+          },
+          plugins: {
+            legend: { display: true }
+          }
+        }
+      ));
+
+      // Register the AQ bands plugin only for this page instance
+      charts[2].config.plugins = [aqBandsPlugin];
+      charts[2].update();
+    }
+  </script>
 </body>
 </html>
-

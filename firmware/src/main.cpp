@@ -45,19 +45,15 @@ static uint32_t pulsingBlue(uint32_t nowMs) {
 
 // 0..100 index from TVOC ppb (tune later!)
 static uint8_t tvocToIndex(uint16_t tvoc) {
-  if (tvoc <= 400) {
-    // 0..400 ppb → 0..20
-    return (uint8_t)(tvoc / 20);
+  if (tvoc <= 200) {
+    // 0..200 ppb → 0..60
+    return (uint8_t)(tvoc * 60 / 200);
   }
-  if (tvoc <= 1000) {
-    // 400..1000 ppb → 20..50
-    return (uint8_t)(20 + (tvoc - 400) * 30 / 600);
+  if (tvoc <= 800) {
+    // 200..800 ppb → 60..90
+    return (uint8_t)(60 + (tvoc - 200) * 30 / 600);
   }
-  if (tvoc <= 2000) {
-    // 1000..2000 ppb → 50..80
-    return (uint8_t)(50 + (tvoc - 1000) * 30 / 1000);
-  }
-  // >2000 ppb → clamp
+  // >800 ppb → clamp
   return 100;
 }
 
