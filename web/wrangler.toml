@@ -1,0 +1,11 @@
+name = "airq-web"
+compatibility_date = "2024-01-01"
+pages_build_output_dir = "./public"
+
+# Cloudflare Pages configuration
+# The "functions" directory will be automatically detected
+# for Cloudflare Pages Functions (Workers)
+
+[vars]
+ENVIRONMENT = "development"
+

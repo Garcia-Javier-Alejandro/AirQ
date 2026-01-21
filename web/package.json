@@ -1,0 +1,16 @@
+{
+  "name": "airq-web",
+  "version": "0.1.0",
+  "description": "AirQ Air Quality Monitoring System Web Interface",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "@cloudflare/workers-types": "^4.20240117.0"
+  },
+  "devDependencies": {
+    "wrangler": "^3.24.0"
+  }
+}
+
