@@ -82,20 +82,10 @@
 <body>
   <div class="container">
     <h1>AirQ</h1>
-    <div class="muted">Offline time-series dashboard (paste serial JSON)</div>
-
-    <!--
-      Temporary ingest mechanism:
-      Paste the ESP8266 Serial output here (one JSON object per line).
-      This mirrors the firmware payload fields: ts_ms, t_c, rh, tvoc_ppb, eco2_ppm, aq_index, warming_up.
-    -->
-    <textarea id="input" placeholder="Paste ESP8266 serial output here (one JSON per line)"></textarea>
-
-    <!--
-      Parses the textarea and renders charts.
-      Kept as a button-triggered action to avoid parsing partial/incomplete paste operations.
-    -->
-    <button onclick="loadData()">Load data</button>
+    <div class="muted">
+      <span id="status">Loading last hour of data...</span>
+      <button onclick="fetchLatestData()" style="margin-left: 10px; padding: 4px 8px;">Refresh</button>
+    </div>
 
     <!--
       One chart per signal.
@@ -106,11 +96,19 @@
       <div class="panel"><canvas id="gasChart"></canvas></div>
       <div class="panel"><canvas id="aqChart"></canvas></div>
     </div>
+
+    <!-- Manual paste fallback -->
+    <details style="margin-top: 20px;">
+      <summary style="cursor: pointer; color: #666;">Manual paste (for offline data)</summary>
+      <textarea id="input" placeholder="Paste ESP8266 serial output here (one JSON per line)" style="margin-top: 10px;"></textarea>
+      <button onclick="loadManualData()">Load pasted data</button>
+    </details>
   </div>
 
   <script>
     // Track Chart.js instances so we can destroy/rebuild them cleanly on reload
     let charts = [];
+    let autoRefreshInterval = null;
 
     /*
       Create one time-series line chart.
@@ -139,7 +137,40 @@
       - If the pasted text contains malformed JSON, JSON.parse will throw. For now, that is acceptable;
         later we can add a simple try/catch to skip bad lines if needed.
     */
-    function loadData() {
+    function loadManualData() {
+      const lines = document.getElementById("input").value
+        .split("\n")
+        .map(l => l.trim())
+        .filter(l => l.startsWith("{"));
+
+      const samples = lines.map(l => JSON.parse(l));
+      renderCharts(samples);
+      document.getElementById("status").textContent = `Loaded ${samples.length} readings from paste`;
+    }
+
+    // Fetch latest data from API
+    async function fetchLatestData() {
+      try {
+        document.getElementById("status").textContent = "Fetching data...";
+        const response = await fetch('/api/latest');
+        if (!response.ok) throw new Error('Failed to fetch');
+        
+        const samples = await response.json();
+        renderCharts(samples);
+        
+        const count = samples.length;
+        const latest = samples[samples.length - 1];
+        document.getElementById("status").textContent = 
+          count > 0 
+            ? `${count} readings (latest: ${new Date().toLocaleTimeString()})`
+            : "No data in last hour";
+      } catch (error) {
+        console.error("Fetch error:", error);
+        document.getElementById("status").textContent = "Failed to fetch data. Use manual paste below.";
+      }
+    }
+
+    function renderCharts(samples) {
       // Clear previously rendered charts (avoids duplicated canvases and memory leaks)
       charts.forEach(c => c.destroy());
       charts = [];
@@ -333,6 +364,13 @@
       charts[2].config.plugins = [aqBandsPlugin];
       charts[2].update();
     }
+
+    // Auto-load data on page load
+    window.addEventListener('DOMContentLoaded', () => {
+      fetchLatestData();
+      // Auto-refresh every 30 seconds
+      autoRefreshInterval = setInterval(fetchLatestData, 30000);
+    });
   </script>
 </body>
 </html>

@@ -2,12 +2,9 @@ name = "airq-web"
 compatibility_date = "2024-01-01"
 pages_build_output_dir = "./public"
 
-# Cloudflare Pages Functions configuration
-# The "functions" directory will be automatically detected for Pages Functions
-
-# Optional: D1 Database binding (for future data persistence)
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "airq"
-# database_id = "YOUR_DATABASE_ID"
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "airq-db"
+database_id = "b3d6516d-db5e-4e84-9db9-3a0c37a7d0d7"
 

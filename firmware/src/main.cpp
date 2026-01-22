@@ -1,6 +1,6 @@
 // TODO (post-review):
-// - Add hysteresis to LED behavior to prevent flicker near AQ thresholds
-// - Expose AQ thresholds and hysteresis margins via config.h
+// - Add hysteresis to LED behavior to prevent flicker near AQ thresholds ✓ DONE
+// - Expose AQ thresholds and hysteresis margins via config.h ✓ DONE
 // - Evaluate discrete (banded) vs continuous (gradient) LED color signaling
 
 
@@ -18,6 +18,7 @@
 
 static bool shtOk = false;
 static bool sgpOk = false;
+static uint8_t lastAqIndex = 0;  // Track previous AQ index for hysteresis
 
 
 // Hardware stack
@@ -57,18 +58,52 @@ static uint8_t tvocToIndex(uint16_t tvoc) {
   return 100;
 }
 
+// Apply hysteresis to prevent LED flickering near threshold transitions
+// Returns the stabilized AQ index: sticks with lastAqIndex unless
+// the new value is far enough away (beyond the hysteresis band)
+static uint8_t applyHysteresis(uint8_t newIndex) {
+  // If we're in a stable zone far from thresholds, accept the change
+  if (newIndex <= (AQ_THRESHOLD_LOW - AQ_HYSTERESIS_BAND) ||
+      (newIndex > (AQ_THRESHOLD_LOW - AQ_HYSTERESIS_BAND) && 
+       newIndex < (AQ_THRESHOLD_LOW + AQ_HYSTERESIS_BAND) &&
+       lastAqIndex >= AQ_THRESHOLD_LOW) ||
+      (newIndex > (AQ_THRESHOLD_HIGH - AQ_HYSTERESIS_BAND) && 
+       newIndex < (AQ_THRESHOLD_HIGH + AQ_HYSTERESIS_BAND) &&
+       lastAqIndex >= AQ_THRESHOLD_HIGH) ||
+      newIndex >= (AQ_THRESHOLD_HIGH + AQ_HYSTERESIS_BAND)) {
+    // Simplified: accept if clearly away from thresholds
+    if (newIndex < (AQ_THRESHOLD_LOW - AQ_HYSTERESIS_BAND) ||
+        newIndex > (AQ_THRESHOLD_HIGH + AQ_HYSTERESIS_BAND)) {
+      return newIndex;
+    }
+    // In hysteresis zone: check relative to last state
+    if (lastAqIndex < AQ_THRESHOLD_LOW && newIndex < (AQ_THRESHOLD_LOW + AQ_HYSTERESIS_BAND)) {
+      return lastAqIndex;  // Stay in green
+    }
+    if (lastAqIndex >= AQ_THRESHOLD_LOW && lastAqIndex < AQ_THRESHOLD_HIGH &&
+        newIndex >= (AQ_THRESHOLD_LOW - AQ_HYSTERESIS_BAND) && 
+        newIndex < (AQ_THRESHOLD_HIGH + AQ_HYSTERESIS_BAND)) {
+      return lastAqIndex;  // Stay in yellow
+    }
+    if (lastAqIndex >= AQ_THRESHOLD_HIGH && newIndex > (AQ_THRESHOLD_HIGH - AQ_HYSTERESIS_BAND)) {
+      return lastAqIndex;  // Stay in red
+    }
+  }
+  return newIndex;
+}
+
 
 //Index →
-//0    20         60           100
+//0    LOW       HIGH          100
 //|----|----------|------------|
 // G      G→Y        Y→R
 static uint32_t colorForIndex(uint8_t idx) {
-  if (idx <= 20) return leds.Color(0, 255, 0);
-  if (idx <= 60) {
-    float u = (idx - 20) / 40.0f; // green->yellow
+  if (idx <= AQ_THRESHOLD_LOW) return leds.Color(0, 255, 0);
+  if (idx <= AQ_THRESHOLD_HIGH) {
+    float u = (idx - AQ_THRESHOLD_LOW) / (float)(AQ_THRESHOLD_HIGH - AQ_THRESHOLD_LOW);
     return leds.Color((uint8_t)(255 * u), 255, 0);
   }
-  float u = (idx - 60) / 40.0f;   // yellow->red
+  float u = (idx - AQ_THRESHOLD_HIGH) / (float)(100 - AQ_THRESHOLD_HIGH);
   return leds.Color(255, (uint8_t)(255 * (1.0f - u)), 0);
 }
 
@@ -172,12 +207,15 @@ if (sgpOk) {
 
 
 
-    uint16_t idx = tvocToIndex(tvoc);
+uint16_t idx = tvocToIndex(tvoc);
 
     uint32_t ledColor;  //led color!
     if (warmingUp) {
       ledColor = pulsingBlue(now);
     } else {
+      // Apply hysteresis to stabilize LED color transitions
+      idx = applyHysteresis(idx);
+      lastAqIndex = idx;
       ledColor = colorForIndex(idx);
     }
 
