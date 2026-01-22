@@ -2,18 +2,6 @@ name = "airq-web"
 compatibility_date = "2024-01-01"
 pages_build_output_dir = "./public"
 
-# Account and project configuration (set via environment or wrangler login)
-# account_id = "YOUR_ACCOUNT_ID"
-# project_name = "airq"
-
-# Local development configuration
-[env.development]
-vars = { ENVIRONMENT = "development" }
-
-# Production configuration
-[env.production]
-vars = { ENVIRONMENT = "production" }
-
 # Cloudflare Pages Functions configuration
 # The "functions" directory will be automatically detected for Pages Functions
 
