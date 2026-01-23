@@ -3,14 +3,18 @@
   "version": "0.1.0",
   "description": "AirQ Air Quality Monitoring System Web Interface",
   "scripts": {
-    "deploy": "wrangler deploy",
+    "build:css": "tailwindcss -i ./public/styles.css -o ./public/output.css --minify",
+    "watch:css": "tailwindcss -i ./public/styles.css -o ./public/output.css --watch",
+    "deploy": "npm run build:css && wrangler pages deploy public",
     "dev": "wrangler dev"
   },
   "dependencies": {
     "@cloudflare/workers-types": "^4.20240117.0"
   },
   "devDependencies": {
+    "autoprefixer": "^10.4.17",
+    "postcss": "^8.4.33",
+    "tailwindcss": "^3.4.1",
     "wrangler": "^3.24.0"
   }
 }
-

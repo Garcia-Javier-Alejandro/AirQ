@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AirQ – Live Dashboard</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.0/dist/mqtt.min.js"></script>
+
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 20px;
+      background: #fafafa;
+    }
+
+    .container {
+      width: 70%;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin-bottom: 4px;
+    }
+
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
+
+    #status {
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 20px;
+      padding: 10px;
+      background: #f0f0f0;
+      border-radius: 4px;
+    }
+
+    .charts {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 20px;
+    }
+
+    .panel {
+      background: white;
+      padding: 15px;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      position: relative;
+      height: 300px;
+    }
+
+    textarea {
+      width: 100%;
+      height: 200px;
+      font-family: monospace;
+      font-size: 12px;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      resize: vertical;
+    }
+
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+
+    button:hover {
+      background: #0056b3;
+    }
+
+    .controls {
+      background: white;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+      display: flex;
+      gap: 15px;
+      align-items: center;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+
+    .controls select,
+    .controls input[type="date"] {
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+
+    .controls select {
+      background: white;
+      cursor: pointer;
+    }
+
+    .controls label {
+      font-weight: 600;
+      color: #333;
+    }
+
+    .date-range {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    details {
+      background: white;
+      padding: 15px;
+      border-radius: 4px;
+      margin-top: 20px;
+    }
+
+    summary {
+      cursor: pointer;
+      font-weight: bold;
+      color: #007bff;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>AirQ – Live Dashboard</h1>
+    <p class="muted">Real-time air quality monitoring via HiveMQ MQTT</p>
+
+    <div id="status">Initializing...</div>
+
+    <div class="controls">
+      <label for="timeRangeSelect">Time Range:</label>
+      <select id="timeRangeSelect" onchange="handleTimeRangeChange()">
+        <option value="10min">Last 10 min (Real-time)</option>
+        <option value="all">From the beginning (Historical)</option>
+        <option value="custom">Custom range</option>
+      </select>
+      <div class="date-range" id="customDateRange" style="display: none;">
+        <input type="date" id="startDate" />
+        <span>to</span>
+        <input type="date" id="endDate" />
+        <button onclick="loadCustomRange()">Apply</button>
+      </div>
+    </div>
+
+    <div class="charts">
+      <div class="panel"><canvas id="aqChart"></canvas></div>
+      <div class="panel"><canvas id="trhChart"></canvas></div>
+      <div class="panel"><canvas id="gasChart"></canvas></div>
+    </div>
+
+    <!-- Manual paste fallback -->
+    <details>
+      <summary>Manual paste (for offline data)</summary>
+      <textarea id="input" placeholder="Paste ESP8266 serial output here (one JSON per line)"></textarea>
+      <button onclick="loadManualData()">Load pasted data</button>
+    </details>
+  </div>
+
+  <script>
+    // Configuration
+    const MQTT_BROKER = "wss://1f1fff2e23204fa08aef0663add440bc.s1.eu.hivemq.cloud:8884/mqtt";
+    const MQTT_TOPIC = "airq/airq-d1mini-01";
+    const MQTT_USERNAME = "AirQ-01";
+    const MQTT_PASSWORD = "AirQ-01-pass";
+    const HISTORY_SIZE = 120; // Keep last 120 samples (~10 minutes at 5s/sample)
+    const UPDATE_INTERVAL = 5000; // Render charts every 5 seconds
+
+    let samples = [];
+    let historicalData = [];
+    let displayData = [];
+    let charts = [];
+    let mqttClient = null;
+    let updateInterval = null;
+    let currentTimeRange = "10min";
+
+    // Convert timestamp to local time HH:MM:SS
+    function formatTimeOfDay(tsMs) {
+      const date = new Date(tsMs);
+      return date.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        second: '2-digit',
+        hour12: false 
+      });
+    }
+
+    // Handle time range dropdown change
+    function handleTimeRangeChange() {
+      const range = document.getElementById("timeRangeSelect").value;
+      currentTimeRange = range;
+
+      if (range === "custom") {
+        document.getElementById("customDateRange").style.display = "flex";
+      } else {
+        document.getElementById("customDateRange").style.display = "none";
+        if (range === "10min") {
+          displayData = [...samples];
+        } else if (range === "all") {
+          loadHistoricalData();
+        }
+      }
+    }
+
+    // Fetch historical data from Worker
+    async function loadHistoricalData() {
+      try {
+        document.getElementById("status").textContent = "⏳ Loading historical data...";
+        const response = await fetch('/api/history?days=30');
+        const result = await response.json();
+
+        if (result.success && result.data) {
+          historicalData = result.data.map(row => ({
+            ts_ms: new Date(row.timestamp).getTime(),
+            device_id: row.device_id,
+            t_c: row.temp_c_avg,
+            rh: row.rh_avg,
+            tvoc_ppb: row.tvoc_ppb_avg,
+            eco2_ppm: row.eco2_ppm_avg,
+            aq_index: row.aq_index_avg,
+            is_historical: true
+          }));
+
+          displayData = [...historicalData];
+          renderCharts();
+          document.getElementById("status").textContent = 
+            `✓ Loaded ${historicalData.length} historical records`;
+        } else {
+          document.getElementById("status").textContent = "⚠️ No historical data available yet";
+        }
+      } catch (error) {
+        console.error('Failed to load historical data:', error);
+        document.getElementById("status").textContent = "❌ Failed to load historical data";
+      }
+    }
+
+    // Load custom date range
+    async function loadCustomRange() {
+      const startDate = document.getElementById("startDate").value;
+      const endDate = document.getElementById("endDate").value;
+
+      if (!startDate || !endDate) {
+        alert("Please select both start and end dates");
+        return;
+      }
+
+      const start = new Date(startDate).getTime();
+      const end = new Date(endDate).getTime() + 24 * 60 * 60 * 1000; // Include full end day
+
+      displayData = historicalData.filter(d => d.ts_ms >= start && d.ts_ms <= end);
+      renderCharts();
+    }
+
+    function makeChart(canvasId, chartData, chartOptions) {
+      const ctx = document.getElementById(canvasId).getContext("2d");
+      return new Chart(ctx, {
+        type: "line",
+        data: chartData,
+        options: chartOptions
+      });
+    }
+
+    function loadManualData() {
+      const lines = document.getElementById("input").value
+        .split("\n")
+        .map(l => l.trim())
+        .filter(l => l.startsWith("{"));
+
+      samples = lines.map(l => JSON.parse(l));
+      displayData = [...samples];
+      renderCharts();
+      document.getElementById("status").textContent = `Loaded ${samples.length} readings from paste`;
+    }
+
+    function renderCharts() {
+      charts.forEach(c => c.destroy());
+      charts = [];
+
+      if (displayData.length === 0) return;
+
+      // Use time of day for labels
+      const labels = displayData.map(s => formatTimeOfDay(s.ts_ms));
+      const temp = displayData.map(s => s.t_c);
+      const rh = displayData.map(s => s.rh);
+      const tvoc = displayData.map(s => s.tvoc_ppb);
+      const eco2 = displayData.map(s => s.eco2_ppm);
+      const aq = displayData.map(s => s.aq_index);
+
+      // ==================== AQ INDEX CHART (TOP) ====================
+      const aqBandsPlugin = {
+        id: "aqBands",
+        beforeDraw(chart) {
+          const { ctx, chartArea, scales } = chart;
+          if (!chartArea) return;
+          const y = scales.y;
+          const xLeft = chartArea.left;
+          const xRight = chartArea.right;
+          function fillBand(yMin, yMax, rgba) {
+            const yTop = y.getPixelForValue(yMax);
+            const yBottom = y.getPixelForValue(yMin);
+            ctx.save();
+            ctx.fillStyle = rgba;
+            ctx.fillRect(xLeft, yTop, xRight - xLeft, yBottom - yTop);
+            ctx.restore();
+          }
+          fillBand(0, 20,  "rgba(47, 158, 68, 0.15)");  // Green
+          fillBand(20, 60, "rgba(245, 159, 0, 0.15)");  // Yellow
+          fillBand(60, 100,"rgba(255, 107, 107, 0.15)");// Red
+        }
+      };
+
+      charts.push(makeChart(
+        "aqChart",
+        {
+          labels: labels,
+          datasets: [{
+            label: "Air Quality Index (0–100)",
+            data: aq,
+            borderColor: "#2f9e44",
+            borderWidth: 2.5,
+            backgroundColor: "rgba(47, 158, 68, 0.05)",
+            pointRadius: 0,
+            tension: 0.15,
+            yAxisID: "y"
+          }]
+        },
+        {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { 
+              title: { display: true, text: "Time (s since boot)" }
+            },
+            y: {
+              beginAtZero: true,
+              suggestedMax: 100,
+              title: { display: true, text: "AQ Index (0=Good, 20=Fair, 60=Poor, 100=Hazardous)" },
+              grid: { drawBorder: true }
+            }
+          },
+          plugins: { 
+            legend: { display: true, position: "top" },
+            filler: { propagate: true }
+          }
+        }
+      ));
+      charts[0].config.plugins = [aqBandsPlugin];
+      charts[0].update();
+
+      // ==================== TEMPERATURE + HUMIDITY ====================
+      charts.push(makeChart(
+        "trhChart",
+        {
+          labels: labels,
+          datasets: [
+            {
+              label: "Temperature (°C)",
+              data: temp,
+              borderColor: "#ff6b6b",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.15,
+              yAxisID: "yTemp"
+            },
+            {
+              label: "Relative Humidity (%)",
+              data: rh,
+              borderColor: "#4dabf7",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.15,
+              yAxisID: "yRh"
+            }
+          ]
+        },
+        {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { title: { display: true, text: "Time of Day" } },
+            yTemp: {
+              type: "linear",
+              position: "left",
+              title: { display: true, text: "°C" }
+            },
+            yRh: {
+              type: "linear",
+              position: "right",
+              title: { display: true, text: "%" },
+              grid: { drawOnChartArea: false }
+            }
+          },
+          plugins: { legend: { display: true } }
+        }
+      ));
+
+      // ==================== TVOC + eCO₂ ====================
+      charts.push(makeChart(
+        "gasChart",
+        {
+          labels: labels,
+          datasets: [
+            {
+              label: "TVOC (ppb)",
+              data: tvoc,
+              borderColor: "#845ef7",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.15,
+              yAxisID: "yTvoc"
+            },
+            {
+              label: "eCO₂ (ppm)",
+              data: eco2,
+              borderColor: "#f59f00",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.15,
+              yAxisID: "yEco2"
+            }
+          ]
+        },
+        {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { title: { display: true, text: "Time of Day" } },
+            yTvoc: {
+              type: "linear",
+              position: "left",
+              title: { display: true, text: "ppb" }
+            },
+            yEco2: {
+              type: "linear",
+              position: "right",
+              title: { display: true, text: "ppm" },
+              grid: { drawOnChartArea: false }
+            }
+          },
+          plugins: { legend: { display: true } }
+        }
+      ));
+    }
+
+    function connectMQTT() {
+      document.getElementById("status").textContent = "🔄 Connecting to HiveMQ...";
+      
+      mqttClient = mqtt.connect(MQTT_BROKER, {
+        clientId: 'airq-dashboard-' + Math.random().toString(16).substr(2, 8),
+        clean: true,
+        reconnectPeriod: 1000,
+        connectTimeout: 5000,
+        username: MQTT_USERNAME,
+        password: MQTT_PASSWORD
+      });
+
+      mqttClient.on('connect', () => {
+        console.log('Connected to HiveMQ');
+        document.getElementById("status").textContent = "✓ Connected to HiveMQ";
+        mqttClient.subscribe(MQTT_TOPIC, (err) => {
+          if (err) {
+            console.error('Subscribe error:', err);
+            document.getElementById("status").textContent = "❌ Subscribe failed";
+          } else {
+            console.log('Subscribed to', MQTT_TOPIC);
+            document.getElementById("status").textContent = "✓ Listening for data...";
+          }
+        });
+      });
+
+      mqttClient.on('message', (topic, message) => {
+        try {
+          const json = JSON.parse(message.toString());
+          samples.push(json);
+          
+          if (samples.length > HISTORY_SIZE) {
+            samples.shift();
+          }
+          
+          // Update display if in real-time mode
+          if (currentTimeRange === "10min") {
+            displayData = [...samples];
+            renderCharts();
+          }
+          
+          document.getElementById("status").textContent = 
+            `✓ ${samples.length} readings (latest: ${new Date().toLocaleTimeString()})`;
+        } catch (e) {
+          console.error('Parse error:', e);
+        }
+      });
+
+      mqttClient.on('error', (err) => {
+        console.error('MQTT error:', err);
+        document.getElementById("status").textContent = "⚠️ Connection error - retrying...";
+      });
+
+      mqttClient.on('offline', () => {
+        document.getElementById("status").textContent = "⚠️ Offline - reconnecting...";
+      });
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      connectMQTT();
+      
+      // Initialize with real-time mode
+      displayData = [...samples];
+      
+      updateInterval = setInterval(() => {
+        if (currentTimeRange === "10min" && samples.length > 0) {
+          renderCharts();
+        }
+      }, UPDATE_INTERVAL);
+    });
+
+    window.addEventListener('beforeunload', () => {
+      if (updateInterval) clearInterval(updateInterval);
+      if (mqttClient) mqttClient.end();
+    });
+  </script>
+</body>
+</html>
