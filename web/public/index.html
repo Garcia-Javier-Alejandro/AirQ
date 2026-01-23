@@ -78,6 +78,41 @@
       background: #0056b3;
     }
 
+    .controls {
+      background: white;
+      padding: 15px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+      display: flex;
+      gap: 15px;
+      align-items: center;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+
+    .controls select,
+    .controls input[type="date"] {
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+
+    .controls select {
+      background: white;
+      cursor: pointer;
+    }
+
+    .controls label {
+      font-weight: 600;
+      color: #333;
+    }
+
+    .date-range {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
     details {
       background: white;
       padding: 15px;
@@ -98,6 +133,21 @@
     <p class="muted">Real-time air quality monitoring via HiveMQ MQTT</p>
 
     <div id="status">Initializing...</div>
+
+    <div class="controls">
+      <label for="timeRangeSelect">Time Range:</label>
+      <select id="timeRangeSelect" onchange="handleTimeRangeChange()">
+        <option value="10min">Last 10 min (Real-time)</option>
+        <option value="all">From the beginning (Historical)</option>
+        <option value="custom">Custom range</option>
+      </select>
+      <div class="date-range" id="customDateRange" style="display: none;">
+        <input type="date" id="startDate" />
+        <span>to</span>
+        <input type="date" id="endDate" />
+        <button onclick="loadCustomRange()">Apply</button>
+      </div>
+    </div>
 
     <div class="charts">
       <div class="panel"><canvas id="aqChart"></canvas></div>
@@ -123,9 +173,89 @@
     const UPDATE_INTERVAL = 5000; // Render charts every 5 seconds
 
     let samples = [];
+    let historicalData = [];
+    let displayData = [];
     let charts = [];
     let mqttClient = null;
     let updateInterval = null;
+    let currentTimeRange = "10min";
+
+    // Convert timestamp to local time HH:MM:SS
+    function formatTimeOfDay(tsMs) {
+      const date = new Date(tsMs);
+      return date.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        second: '2-digit',
+        hour12: false 
+      });
+    }
+
+    // Handle time range dropdown change
+    function handleTimeRangeChange() {
+      const range = document.getElementById("timeRangeSelect").value;
+      currentTimeRange = range;
+
+      if (range === "custom") {
+        document.getElementById("customDateRange").style.display = "flex";
+      } else {
+        document.getElementById("customDateRange").style.display = "none";
+        if (range === "10min") {
+          displayData = [...samples];
+        } else if (range === "all") {
+          loadHistoricalData();
+        }
+      }
+    }
+
+    // Fetch historical data from Worker
+    async function loadHistoricalData() {
+      try {
+        document.getElementById("status").textContent = "⏳ Loading historical data...";
+        const response = await fetch('/api/history?days=30');
+        const result = await response.json();
+
+        if (result.success && result.data) {
+          historicalData = result.data.map(row => ({
+            ts_ms: new Date(row.timestamp).getTime(),
+            device_id: row.device_id,
+            t_c: row.temp_c_avg,
+            rh: row.rh_avg,
+            tvoc_ppb: row.tvoc_ppb_avg,
+            eco2_ppm: row.eco2_ppm_avg,
+            aq_index: row.aq_index_avg,
+            is_historical: true
+          }));
+
+          displayData = [...historicalData];
+          renderCharts();
+          document.getElementById("status").textContent = 
+            `✓ Loaded ${historicalData.length} historical records`;
+        } else {
+          document.getElementById("status").textContent = "⚠️ No historical data available yet";
+        }
+      } catch (error) {
+        console.error('Failed to load historical data:', error);
+        document.getElementById("status").textContent = "❌ Failed to load historical data";
+      }
+    }
+
+    // Load custom date range
+    async function loadCustomRange() {
+      const startDate = document.getElementById("startDate").value;
+      const endDate = document.getElementById("endDate").value;
+
+      if (!startDate || !endDate) {
+        alert("Please select both start and end dates");
+        return;
+      }
+
+      const start = new Date(startDate).getTime();
+      const end = new Date(endDate).getTime() + 24 * 60 * 60 * 1000; // Include full end day
+
+      displayData = historicalData.filter(d => d.ts_ms >= start && d.ts_ms <= end);
+      renderCharts();
+    }
 
     function makeChart(canvasId, chartData, chartOptions) {
       const ctx = document.getElementById(canvasId).getContext("2d");
@@ -143,6 +273,7 @@
         .filter(l => l.startsWith("{"));
 
       samples = lines.map(l => JSON.parse(l));
+      displayData = [...samples];
       renderCharts();
       document.getElementById("status").textContent = `Loaded ${samples.length} readings from paste`;
     }
@@ -151,14 +282,15 @@
       charts.forEach(c => c.destroy());
       charts = [];
 
-      if (samples.length === 0) return;
+      if (displayData.length === 0) return;
 
-      const t = samples.map(s => (s.ts_ms / 1000).toFixed(1));
-      const temp = samples.map(s => s.t_c);
-      const rh = samples.map(s => s.rh);
-      const tvoc = samples.map(s => s.tvoc_ppb);
-      const eco2 = samples.map(s => s.eco2_ppm);
-      const aq = samples.map(s => s.aq_index);
+      // Use time of day for labels
+      const labels = displayData.map(s => formatTimeOfDay(s.ts_ms));
+      const temp = displayData.map(s => s.t_c);
+      const rh = displayData.map(s => s.rh);
+      const tvoc = displayData.map(s => s.tvoc_ppb);
+      const eco2 = displayData.map(s => s.eco2_ppm);
+      const aq = displayData.map(s => s.aq_index);
 
       // ==================== AQ INDEX CHART (TOP) ====================
       const aqBandsPlugin = {
@@ -186,7 +318,7 @@
       charts.push(makeChart(
         "aqChart",
         {
-          labels: t,
+          labels: labels,
           datasets: [{
             label: "Air Quality Index (0–100)",
             data: aq,
@@ -225,7 +357,7 @@
       charts.push(makeChart(
         "trhChart",
         {
-          labels: t,
+          labels: labels,
           datasets: [
             {
               label: "Temperature (°C)",
@@ -251,7 +383,7 @@
           responsive: true,
           maintainAspectRatio: false,
           scales: {
-            x: { title: { display: true, text: "Time (s since boot)" } },
+            x: { title: { display: true, text: "Time of Day" } },
             yTemp: {
               type: "linear",
               position: "left",
@@ -272,7 +404,7 @@
       charts.push(makeChart(
         "gasChart",
         {
-          labels: t,
+          labels: labels,
           datasets: [
             {
               label: "TVOC (ppb)",
@@ -298,7 +430,7 @@
           responsive: true,
           maintainAspectRatio: false,
           scales: {
-            x: { title: { display: true, text: "Time (s since boot)" } },
+            x: { title: { display: true, text: "Time of Day" } },
             yTvoc: {
               type: "linear",
               position: "left",
@@ -351,6 +483,12 @@
             samples.shift();
           }
           
+          // Update display if in real-time mode
+          if (currentTimeRange === "10min") {
+            displayData = [...samples];
+            renderCharts();
+          }
+          
           document.getElementById("status").textContent = 
             `✓ ${samples.length} readings (latest: ${new Date().toLocaleTimeString()})`;
         } catch (e) {
@@ -371,8 +509,11 @@
     window.addEventListener('DOMContentLoaded', () => {
       connectMQTT();
       
+      // Initialize with real-time mode
+      displayData = [...samples];
+      
       updateInterval = setInterval(() => {
-        if (samples.length > 0) {
+        if (currentTimeRange === "10min" && samples.length > 0) {
           renderCharts();
         }
       }, UPDATE_INTERVAL);
