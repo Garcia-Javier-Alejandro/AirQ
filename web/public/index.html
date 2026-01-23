@@ -1,27 +1,13 @@
-<!--
-  AirQ – Offline Dashboard
-
-  Static, offline-first dashboard to visualize time-series data
-  Data is pasted as one JSON object per line (matching Serial.println(json)).
-
-  Later: replace the textarea paste input with fetch() calls once an ingest API exists.
--->
-
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AirQ – Dashboard</title>
+  <title>AirQ – Live Dashboard</title>
 
-  <!--
-    Chart.js is used to render time-series charts without any build tooling.
-  -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.0/dist/mqtt.min.js"></script>
 
-  <!--
-    Minimal styling to keep the focus on data inspection.
-  -->
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -29,10 +15,6 @@
       background: #fafafa;
     }
 
-    /*
-      Constrain the dashboard to 70% width and center it.
-      This keeps the layout readable on wide monitors and matches a “panel” feel.
-    */
     .container {
       width: 70%;
       margin: 0 auto;
@@ -47,76 +29,104 @@
       font-size: 14px;
     }
 
-    textarea {
-      width: 100%;
-      height: 140px;
-      font-family: monospace;
-      margin: 12px 0;
-    }
-
-    button {
-      padding: 8px 14px;
+    #status {
+      color: #666;
       font-size: 14px;
+      margin-bottom: 20px;
+      padding: 10px;
+      background: #f0f0f0;
+      border-radius: 4px;
     }
 
-    .grid {
+    .charts {
       display: grid;
       grid-template-columns: 1fr;
-      gap: 24px;
+      gap: 20px;
     }
 
     .panel {
       background: white;
-      border: 1px solid #ddd;
-      border-radius: 10px;
-      padding: 12px;
+      padding: 15px;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      position: relative;
+      height: 300px;
     }
 
-    canvas {
+    textarea {
       width: 100%;
-      height: 260px;
+      height: 200px;
+      font-family: monospace;
+      font-size: 12px;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      resize: vertical;
+    }
+
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+
+    button:hover {
+      background: #0056b3;
+    }
+
+    details {
+      background: white;
+      padding: 15px;
+      border-radius: 4px;
+      margin-top: 20px;
+    }
+
+    summary {
+      cursor: pointer;
+      font-weight: bold;
+      color: #007bff;
     }
   </style>
 </head>
-
 <body>
   <div class="container">
-    <h1>AirQ</h1>
-    <div class="muted">
-      <span id="status">Loading last hour of data...</span>
-      <button onclick="fetchLatestData()" style="margin-left: 10px; padding: 4px 8px;">Refresh</button>
-    </div>
+    <h1>AirQ – Live Dashboard</h1>
+    <p class="muted">Real-time air quality monitoring via HiveMQ MQTT</p>
 
-    <!--
-      One chart per signal.
-      Each chart shares the same time axis (ts_ms converted to seconds).
-    -->
-    <div class="grid">
+    <div id="status">Initializing...</div>
+
+    <div class="charts">
       <div class="panel"><canvas id="trhChart"></canvas></div>
       <div class="panel"><canvas id="gasChart"></canvas></div>
       <div class="panel"><canvas id="aqChart"></canvas></div>
     </div>
 
     <!-- Manual paste fallback -->
-    <details style="margin-top: 20px;">
-      <summary style="cursor: pointer; color: #666;">Manual paste (for offline data)</summary>
-      <textarea id="input" placeholder="Paste ESP8266 serial output here (one JSON per line)" style="margin-top: 10px;"></textarea>
+    <details>
+      <summary>Manual paste (for offline data)</summary>
+      <textarea id="input" placeholder="Paste ESP8266 serial output here (one JSON per line)"></textarea>
       <button onclick="loadManualData()">Load pasted data</button>
     </details>
   </div>
 
   <script>
-    // Track Chart.js instances so we can destroy/rebuild them cleanly on reload
+    // Configuration
+    const MQTT_BROKER = "wss://1f1fff2e23204fa08aef0663add440bc.s1.eu.hivemq.cloud:8884/mqtt";
+    const MQTT_TOPIC = "airq/airq-d1mini-01";
+    const MQTT_USERNAME = "AirQ-01";
+    const MQTT_PASSWORD = "AirQ-01-pass";
+    const HISTORY_SIZE = 120; // Keep last 120 samples (~4 minutes at 2s/sample)
+    const UPDATE_INTERVAL = 5000; // Render charts every 5 seconds
+
+    let samples = [];
     let charts = [];
-    let autoRefreshInterval = null;
+    let mqttClient = null;
+    let updateInterval = null;
 
-    /*
-      Create one time-series line chart.
-
-      Why this helper exists:
-      - Keeps chart construction consistent across panels
-      - Makes it easy to tune common chart options in one place (axes, point density, smoothing)
-    */
     function makeChart(canvasId, chartData, chartOptions) {
       const ctx = document.getElementById(canvasId).getContext("2d");
       return new Chart(ctx, {
@@ -126,76 +136,31 @@
       });
     }
 
-    /*
-      Parse the pasted JSON lines into an array of samples and render charts.
-
-      Input expectation:
-      - Each line begins with '{' and is valid JSON (as printed by Serial.println(json))
-      - ts_ms is used as the time axis (converted to seconds for readability)
-
-      Failure mode:
-      - If the pasted text contains malformed JSON, JSON.parse will throw. For now, that is acceptable;
-        later we can add a simple try/catch to skip bad lines if needed.
-    */
     function loadManualData() {
       const lines = document.getElementById("input").value
         .split("\n")
         .map(l => l.trim())
         .filter(l => l.startsWith("{"));
 
-      const samples = lines.map(l => JSON.parse(l));
-      renderCharts(samples);
+      samples = lines.map(l => JSON.parse(l));
+      renderCharts();
       document.getElementById("status").textContent = `Loaded ${samples.length} readings from paste`;
     }
 
-    // Fetch latest data from API
-    async function fetchLatestData() {
-      try {
-        document.getElementById("status").textContent = "Fetching data...";
-        const response = await fetch('/api/latest');
-        if (!response.ok) throw new Error('Failed to fetch');
-        
-        const samples = await response.json();
-        renderCharts(samples);
-        
-        const count = samples.length;
-        const latest = samples[samples.length - 1];
-        document.getElementById("status").textContent = 
-          count > 0 
-            ? `${count} readings (latest: ${new Date().toLocaleTimeString()})`
-            : "No data in last hour";
-      } catch (error) {
-        console.error("Fetch error:", error);
-        document.getElementById("status").textContent = "Failed to fetch data. Use manual paste below.";
-      }
-    }
-
-    function renderCharts(samples) {
-      // Clear previously rendered charts (avoids duplicated canvases and memory leaks)
+    function renderCharts() {
       charts.forEach(c => c.destroy());
       charts = [];
 
-      const lines = document.getElementById("input").value
-        .split("\n")
-        .map(l => l.trim())
-        .filter(l => l.startsWith("{"));
+      if (samples.length === 0) return;
 
-      const samples = lines.map(l => JSON.parse(l));
-
-      // Convert ts_ms to seconds since boot (string labels keep Chart.js axis readable)
       const t = samples.map(s => (s.ts_ms / 1000).toFixed(1));
-
-      // Extract signals matching the firmware JSON keys
       const temp = samples.map(s => s.t_c);
       const rh = samples.map(s => s.rh);
       const tvoc = samples.map(s => s.tvoc_ppb);
       const eco2 = samples.map(s => s.eco2_ppm);
       const aq = samples.map(s => s.aq_index);
 
-      /*
-        Temperature + Relative Humidity on a shared time axis with dual Y scales.
-        This keeps environmental context in a single panel while preserving readability.
-      */
+      // Temperature + Humidity
       charts.push(makeChart(
         "trhChart",
         {
@@ -238,16 +203,11 @@
               grid: { drawOnChartArea: false }
             }
           },
-          plugins: {
-            legend: { display: true }
-          }
+          plugins: { legend: { display: true } }
         }
       ));
 
-      /*
-        TVOC + eCO₂ on a shared time axis with dual Y scales.
-        These are related signals but have different magnitudes/units, so they must not share one scale.
-      */
+      // TVOC + eCO₂
       charts.push(makeChart(
         "gasChart",
         {
@@ -290,30 +250,19 @@
               grid: { drawOnChartArea: false }
             }
           },
-          plugins: {
-            legend: { display: true }
-          }
+          plugins: { legend: { display: true } }
         }
       ));
 
-      /*
-        AQ Index chart with threshold bands:
-        - Green band: 0–20
-        - Yellow band: 20–60
-        - Red band: 60–100
-
-        This provides a Grafana-like “state background” that matches the firmware’s AQ semantics.
-      */
+      // AQ Index with threshold bands
       const aqBandsPlugin = {
         id: "aqBands",
         beforeDraw(chart) {
           const { ctx, chartArea, scales } = chart;
           if (!chartArea) return;
-
           const y = scales.y;
           const xLeft = chartArea.left;
           const xRight = chartArea.right;
-
           function fillBand(yMin, yMax, rgba) {
             const yTop = y.getPixelForValue(yMax);
             const yBottom = y.getPixelForValue(yMin);
@@ -322,7 +271,6 @@
             ctx.fillRect(xLeft, yTop, xRight - xLeft, yBottom - yTop);
             ctx.restore();
           }
-
           fillBand(0, 20,  "rgba(47, 158, 68, 0.10)");
           fillBand(20, 60, "rgba(245, 159, 0, 0.10)");
           fillBand(60, 100,"rgba(255, 107, 107, 0.10)");
@@ -354,22 +302,79 @@
               title: { display: true, text: "AQ Index" }
             }
           },
-          plugins: {
-            legend: { display: true }
-          }
+          plugins: { legend: { display: true } }
         }
       ));
 
-      // Register the AQ bands plugin only for this page instance
       charts[2].config.plugins = [aqBandsPlugin];
       charts[2].update();
     }
 
-    // Auto-load data on page load
+    function connectMQTT() {
+      document.getElementById("status").textContent = "🔄 Connecting to HiveMQ...";
+      
+      mqttClient = mqtt.connect(MQTT_BROKER, {
+        clientId: 'airq-dashboard-' + Math.random().toString(16).substr(2, 8),
+        clean: true,
+        reconnectPeriod: 1000,
+        connectTimeout: 5000,
+        username: MQTT_USERNAME,
+        password: MQTT_PASSWORD
+      });
+
+      mqttClient.on('connect', () => {
+        console.log('Connected to HiveMQ');
+        document.getElementById("status").textContent = "✓ Connected to HiveMQ";
+        mqttClient.subscribe(MQTT_TOPIC, (err) => {
+          if (err) {
+            console.error('Subscribe error:', err);
+            document.getElementById("status").textContent = "❌ Subscribe failed";
+          } else {
+            console.log('Subscribed to', MQTT_TOPIC);
+            document.getElementById("status").textContent = "✓ Listening for data...";
+          }
+        });
+      });
+
+      mqttClient.on('message', (topic, message) => {
+        try {
+          const json = JSON.parse(message.toString());
+          samples.push(json);
+          
+          if (samples.length > HISTORY_SIZE) {
+            samples.shift();
+          }
+          
+          document.getElementById("status").textContent = 
+            `✓ ${samples.length} readings (latest: ${new Date().toLocaleTimeString()})`;
+        } catch (e) {
+          console.error('Parse error:', e);
+        }
+      });
+
+      mqttClient.on('error', (err) => {
+        console.error('MQTT error:', err);
+        document.getElementById("status").textContent = "⚠️ Connection error - retrying...";
+      });
+
+      mqttClient.on('offline', () => {
+        document.getElementById("status").textContent = "⚠️ Offline - reconnecting...";
+      });
+    }
+
     window.addEventListener('DOMContentLoaded', () => {
-      fetchLatestData();
-      // Auto-refresh every 30 seconds
-      autoRefreshInterval = setInterval(fetchLatestData, 30000);
+      connectMQTT();
+      
+      updateInterval = setInterval(() => {
+        if (samples.length > 0) {
+          renderCharts();
+        }
+      }, UPDATE_INTERVAL);
+    });
+
+    window.addEventListener('beforeunload', () => {
+      if (updateInterval) clearInterval(updateInterval);
+      if (mqttClient) mqttClient.end();
     });
   </script>
 </body>

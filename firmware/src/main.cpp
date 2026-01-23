@@ -1,24 +1,28 @@
-// TODO (post-review):
-// - Add hysteresis to LED behavior to prevent flicker near AQ thresholds ✓ DONE
-// - Expose AQ thresholds and hysteresis margins via config.h ✓ DONE
-// - Evaluate discrete (banded) vs continuous (gradient) LED color signaling
-
-
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecureBearSSL.h>
-#include <ESP8266HTTPClient.h>
 #include <Wire.h>
+#include <time.h>
+
+#include <Adafruit_MQTT.h>
+#include <Adafruit_MQTT_Client.h>
 
 #include <Adafruit_SGP30.h>
 #include <Adafruit_SHT31.h>
 #include <Adafruit_NeoPixel.h>
 
-#include "config.h" // local secrets + per-device settings (NOT committed; See config.example.h for an example)
+#include "config.h"
 
 static bool shtOk = false;
 static bool sgpOk = false;
-static uint8_t lastAqIndex = 0;  // Track previous AQ index for hysteresis
+static uint8_t lastAqIndex = 0;
+
+// HiveMQ MQTT client with TLS
+BearSSL::WiFiClientSecure wifiClient;
+Adafruit_MQTT_Client mqtt(&wifiClient, MQTT_BROKER, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD);
+
+// HiveMQ Publish topic
+Adafruit_MQTT_Publish* mqttPub = nullptr;
 
 
 // Hardware stack
@@ -120,31 +124,71 @@ static uint32_t absoluteHumidity_mgm3(float tempC, float rh) {
 }
 
 static void wifiConnect() {
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+  
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - t0) < 15000) {
+    Serial.print(".");
     delay(250);
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    
+    // Configure TLS client
+    wifiClient.setInsecure();
+  } else {
+    Serial.println("\nWiFi connection failed (continuing offline)");
   }
 }
 
-// HTTPS POST to Cloudlfare ingest endpoint
-static bool postIngest(const String& json) {
-  if (WiFi.status() != WL_CONNECTED) return false;
+// Connect to HiveMQ MQTT broker
+static void mqttConnect() {
+  if (mqtt.connected()) return;
+  
+  // Build publish topic on first connection
+  if (mqttPub == nullptr) {
+    mqttPub = new Adafruit_MQTT_Publish(&mqtt, MQTT_TOPIC);
+  }
+  
+  Serial.print("[MQTT] Connecting to HiveMQ... ");
+  int8_t ret = mqtt.connect();
+  if (ret == 0) {
+    Serial.println("Connected!");
+  } else {
+    Serial.print("Failed: ");
+    Serial.println(mqtt.connectErrorString(ret));
+  }
+}
 
-  std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
-  client->setInsecure(); // MVP; later: CA bundle
+// Publish JSON to HiveMQ
+static bool publishToMQTT(const String& json) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[MQTT] WiFi not connected");
+    return false;
+  }
 
-  HTTPClient https;
-  if (!https.begin(*client, INGEST_URL)) return false;
+  mqttConnect();
+  
+  if (!mqtt.connected() || mqttPub == nullptr) {
+    Serial.println("[MQTT] Broker not connected");
+    return false;
+  }
 
-  https.addHeader("Content-Type", "application/json");
-  https.addHeader("Authorization", String("Bearer ") + INGEST_TOKEN);
-
-  int code = https.POST((uint8_t*)json.c_str(), json.length());
-  https.end();
-  return (code >= 200 && code < 300);
+  Serial.print("[MQTT] Publishing to " + String(MQTT_TOPIC) + "... ");
+  bool ok = mqttPub->publish(json.c_str());
+  if (ok) {
+    Serial.println("✓");
+  } else {
+    Serial.println("✗");
+  }
+  return ok;
 }
 
 void setup() {
@@ -174,6 +218,12 @@ void setup() {
 void loop() {
   uint32_t now = millis();
   bool warmingUp = (now - bootMs) < WARMUP_MS;
+
+  // Keep MQTT alive
+  mqtt.processPackets(10);
+  if (!mqtt.ping()) {
+    mqttConnect();
+  }
 
   // Sample cadence (SGP30 IAQ wants ~1 Hz; keep SAMPLE_MS around 1000 in config.h)
   if (now - lastSample >= SAMPLE_MS) {
@@ -234,7 +284,7 @@ json += "\"warming_up\":" + String(warmingUp ? "true" : "false"); // Warmup flag
 json += "}";  // End JSON
 
 Serial.println(json);      // Serial log
-(void)postIngest(json);    // Cloud ingest (best-effort)
+(void)publishToMQTT(json);    // HiveMQ MQTT publication (best-effort)
 
   }
 }

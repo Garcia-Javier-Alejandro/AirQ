@@ -113,11 +113,12 @@ Per-sample JSON emitted over serial and posted to cloud:
 
 ## Web / Dashboard Architecture
 
-### Static Dashboard
-- **No backend, no build step, no framework**
-- Purpose: Visualize time-series data, validate sensor behavior, tune AQ index
-- **Input**: Paste one JSON object per line (from serial output)
-- **Visualization**: Chart.js with multi-axis plots
+### Live Dashboard
+- **Real-time MQTT connection via WebSocket**
+- Connects to HiveMQ broker, subscribes to device topic
+- Auto-updates charts every 5 seconds
+- Visualizes last 120 samples (~4 minutes at 2s interval)
+- Fallback: Manual JSON paste for offline data
 
 ### Plots
 1. **Temperature + Humidity** (dual Y-axis)
@@ -127,14 +128,9 @@ Per-sample JSON emitted over serial and posted to cloud:
 ## Cloud Architecture
 
 ### Current Status
-- **Cloudflare Pages**: Static hosting for dashboard
-- **Cloudflare Workers**: API endpoint for data ingestion (stub)
+- **HiveMQ MQTT Broker**: Real-time pub/sub messaging
+- **Cloudflare Pages**: Static dashboard hosting
 - **GitHub Actions**: Automated deployment on push
-
-### Future
-- D1 database for persistence
-- Time-series visualization (Grafana-style)
-- Per-device analytics
 
 ## Configuration
 
@@ -145,18 +141,21 @@ Per-sample JSON emitted over serial and posted to cloud:
 static const char* WIFI_SSID = "YOUR_SSID";
 static const char* WIFI_PASSWORD = "YOUR_PASSWORD";
 
-// Cloud ingest
-static const char* INGEST_URL = "https://airq.pages.dev/api/ingest";
-static const char* INGEST_TOKEN = "your-bearer-token";
+// HiveMQ MQTT Broker
+static const char* MQTT_BROKER = "your-cluster.hivemq.cloud";
+static const uint16_t MQTT_PORT = 8883;
+static const char* MQTT_USERNAME = "your-username";
+static const char* MQTT_PASSWORD = "your-password";
+static const char* MQTT_TOPIC = "airq/your-device-id";
 
 // Sampling
-static const uint32_t SAMPLE_MS = 1000;  // 1 Hz
+static const uint32_t SAMPLE_MS = 2000;
 
 // LED
 static const uint8_t LED_BRIGHTNESS = 40;
 
 // Warm-up
-static const uint32_t WARMUP_MS = 60000; // 60 seconds
+static const uint32_t WARMUP_MS = 60000;
 
 // AQ Index thresholds & hysteresis
 static const uint8_t AQ_THRESHOLD_LOW = 20;
@@ -225,17 +224,15 @@ web/
 
 ⚠️ **AQ Index is conservative**: Based on TVOC only; may underestimate poor air quality
 ⚠️ **No real CO₂ measurement**: eCO₂ is inferred; consider NDIR sensor for accuracy
-⚠️ **No persistence**: Browser paste-based dashboard only (cloud persistence coming)
-⚠️ **BearSSL w/o CA bundle**: Uses `setInsecure()` for MVP; upgrade to CA bundle in production
+⚠️ **TLS certificate validation disabled**: Uses `setInsecure()` for MVP
 
-## TODO (Post-Review)
+## TODO
 
-✅ Add hysteresis to LED behavior
-✅ Expose AQ thresholds and hysteresis via config.h
 - Evaluate discrete (banded) vs continuous (gradient) LED color signaling
-- Implement per-device time-series persistence (D1)
-- Add token validation and rate limiting
+- Add EEPROM-based WiFi credential storage
 - Support NDIR CO₂ sensor module
+- Add data persistence (D1 database integration)
+- Implement certificate validation for production TLS
 
 ## References
 
@@ -243,7 +240,7 @@ web/
 - [Sensirion SHT31 Datasheet](https://sensirion.com/products/catalog/SHT31/)
 - [ESP8266 Documentation](https://arduino-esp8266.readthedocs.io/)
 - [Adafruit Libraries](https://github.com/adafruit)
-- [Cloudflare Pages Docs](https://developers.cloudflare.com/pages/)
+- [HiveMQ Cloud](https://www.hivemq.com/mqtt-cloud-broker/)
 
 ## License
 

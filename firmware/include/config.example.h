@@ -1,18 +1,21 @@
 #pragma once
 
-// Wi-Fi (replace in config.h)
+// Wi-Fi
 static const char* WIFI_SSID     = "YOUR_WIFI_SSID";
 static const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
-// Cloud ingest endpoint (replace in config.h)
-static const char* INGEST_URL   = "https://airq-5xv.pages.dev/api/ingest";
-static const char* INGEST_TOKEN = "REPLACE_WITH_SECRET_TOKEN";
+// HiveMQ MQTT Broker
+static const char* MQTT_BROKER   = "your-cluster.hivemq.cloud";
+static const uint16_t MQTT_PORT  = 8883;
+static const char* MQTT_USERNAME = "your-username";
+static const char* MQTT_PASSWORD = "your-password";
+static const char* MQTT_TOPIC    = "airq/your-device-id";
 
 // Identity
 static const char* DEVICE_ID = "airq-d1mini-01";
 
 // Sampling
-static const uint32_t SAMPLE_MS = 1000;
+static const uint32_t SAMPLE_MS = 2000;
 
 // NeoPixel shield
 static const uint8_t PIN_NEOPIXEL = D4;   // common default for D1 mini shields
