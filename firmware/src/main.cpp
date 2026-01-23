@@ -191,6 +191,46 @@ static bool publishToMQTT(const String& json) {
   return ok;
 }
 
+static bool postToWorker(const String& json) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WORKER] WiFi not connected");
+    return false;
+  }
+
+  BearSSL::WiFiClientSecure client;
+  client.setInsecure();
+
+  if (!client.connect("airq-5xv.pages.dev", 443)) {
+    Serial.println("[WORKER] Connection failed");
+    return false;
+  }
+
+  String post = String("POST /api/store HTTP/1.1\r\n") +
+                "Host: airq-5xv.pages.dev\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: " + json.length() + "\r\n" +
+                "Connection: close\r\n" +
+                "\r\n" +
+                json;
+
+  Serial.print("[WORKER] POSTing... ");
+  client.print(post);
+  
+  // Read response status line
+  String statusLine = client.readStringUntil('\n');
+  bool success = statusLine.indexOf("200") > 0;
+  
+  if (success) {
+    Serial.println("✓");
+  } else {
+    Serial.println("✗ (" + statusLine + ")");
+  }
+
+  client.stop();
+  return success;
+}
+
+
 void setup() {
   bootMs = millis();
   Serial.begin(115200);
@@ -285,6 +325,7 @@ json += "}";  // End JSON
 
 Serial.println(json);      // Serial log
 (void)publishToMQTT(json);    // HiveMQ MQTT publication (best-effort)
+(void)postToWorker(json);     // Cloudflare Worker for D1 storage (best-effort)
 
   }
 }
